@@ -1,5 +1,5 @@
 #!/bin/bash
-# install-sentinel.sh - Script to install and set up the Sentinel VPS
+# install-sentinel.sh - Script to install and set up the Sentinel VPS (without MongoDB installation)
 
 # Exit on any error
 set -e
@@ -12,6 +12,7 @@ NC='\033[0m' # No Color
 
 echo -e "${GREEN}=== Sentinel VPS Installation Script ===${NC}"
 echo "This script will install and configure the Sentinel VPS application."
+echo -e "${YELLOW}Note: This script will not install MongoDB. You need to have MongoDB already running.${NC}"
 
 # Check if running as root
 if [ "$(id -u)" -ne 0 ]; then
@@ -43,25 +44,6 @@ echo -e "${GREEN}Node.js installed: ${NODE_VERSION}${NC}"
 echo -e "\n${YELLOW}Installing PM2...${NC}"
 npm install pm2 -g
 
-# Install MongoDB if not already installed
-if ! command -v mongod &> /dev/null; then
-    echo -e "\n${YELLOW}Installing MongoDB...${NC}"
-    wget -qO - https://www.mongodb.org/static/pgp/server-6.0.asc | apt-key add -
-    echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/6.0 multiverse" | tee /etc/apt/sources.list.d/mongodb-org-6.0.list
-    apt-get update
-    apt-get install -y mongodb-org
-    
-    # Enable and start MongoDB service
-    systemctl enable mongod
-    systemctl start mongod
-    echo -e "${GREEN}MongoDB installed and started${NC}"
-else
-    echo -e "${GREEN}MongoDB already installed${NC}"
-    # Make sure MongoDB is running
-    systemctl enable mongod
-    systemctl start mongod
-fi
-
 # Create application directory
 APP_DIR="/opt/sentinel-vps"
 echo -e "\n${YELLOW}Creating application directory at ${APP_DIR}...${NC}"
@@ -75,6 +57,30 @@ if [ -z "$DOMAIN_NAME" ]; then
     DOMAIN_NAME="localhost"
     echo "Using 'localhost' as domain"
 fi
+
+# Ask for MongoDB connection details
+echo -e "\n${YELLOW}MongoDB Connection Configuration${NC}"
+read -p "MongoDB Host (default: localhost): " MONGO_HOST
+MONGO_HOST=${MONGO_HOST:-localhost}
+
+read -p "MongoDB Port (default: 27017): " MONGO_PORT
+MONGO_PORT=${MONGO_PORT:-27017}
+
+read -p "MongoDB Database Name (default: sentinel): " MONGO_DB
+MONGO_DB=${MONGO_DB:-sentinel}
+
+read -p "MongoDB Username (leave blank if not required): " MONGO_USER
+read -s -p "MongoDB Password (leave blank if not required): " MONGO_PASS
+echo ""
+
+# Construct MongoDB URI
+if [ -z "$MONGO_USER" ]; then
+    MONGO_URI="mongodb://${MONGO_HOST}:${MONGO_PORT}/${MONGO_DB}"
+else
+    MONGO_URI="mongodb://${MONGO_USER}:${MONGO_PASS}@${MONGO_HOST}:${MONGO_PORT}/${MONGO_DB}"
+fi
+
+echo -e "${GREEN}MongoDB URI configured${NC}"
 
 # Ask for JWT secret
 read -p "Enter a JWT secret (leave blank to generate one): " JWT_SECRET
@@ -95,7 +101,7 @@ echo -e "\n${YELLOW}Creating .env file...${NC}"
 cat > $APP_DIR/.env << EOF
 NODE_ENV=production
 PORT=3000
-MONGODB_URI=mongodb://localhost:27017/sentinel
+MONGODB_URI=${MONGO_URI}
 JWT_SECRET=${JWT_SECRET}
 JWT_EXPIRES_IN=1d
 NODE_SECRET=${NODE_SECRET}
@@ -150,6 +156,40 @@ fi
 echo -e "\n${YELLOW}Installing application dependencies...${NC}"
 npm install --production
 
+# Test MongoDB connection
+echo -e "\n${YELLOW}Testing MongoDB connection...${NC}"
+cat > $APP_DIR/test-mongo.js << EOF
+const mongoose = require('mongoose');
+
+mongoose.connect('${MONGO_URI}', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => {
+  console.log('MongoDB connection successful');
+  process.exit(0);
+})
+.catch(err => {
+  console.error('MongoDB connection error:', err.message);
+  process.exit(1);
+});
+EOF
+
+if node $APP_DIR/test-mongo.js; then
+    echo -e "${GREEN}MongoDB connection successful${NC}"
+else
+    echo -e "${RED}Failed to connect to MongoDB. Please check your connection details and ensure MongoDB is running.${NC}"
+    echo -e "${YELLOW}You may need to fix the MongoDB URI in $APP_DIR/.env before continuing.${NC}"
+    read -p "Do you want to continue with the installation? (y/n): " CONTINUE
+    if [ "$CONTINUE" != "y" ] && [ "$CONTINUE" != "Y" ]; then
+        echo "Installation aborted."
+        exit 1
+    fi
+fi
+
+# Remove test file
+rm $APP_DIR/test-mongo.js
+
 # Set up PM2 ecosystem file
 echo -e "\n${YELLOW}Setting up PM2 configuration...${NC}"
 cat > $APP_DIR/ecosystem.config.js << EOF
@@ -165,7 +205,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 3000,
-        MONGODB_URI: 'mongodb://localhost:27017/sentinel',
+        MONGODB_URI: '${MONGO_URI}',
         JWT_SECRET: '${JWT_SECRET}',
         NODE_SECRET: '${NODE_SECRET}',
         LOG_LEVEL: 'info',
@@ -190,7 +230,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 // Connect to MongoDB
-mongoose.connect('mongodb://localhost:27017/sentinel', {
+mongoose.connect('${MONGO_URI}', {
   useNewUrlParser: true,
   useUnifiedTopology: true
 });
